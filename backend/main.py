@@ -1,14 +1,13 @@
 """
 FastAPI 主程式 - 影片即時字幕生成服務
 """
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
 import uuid
 from pathlib import Path
 from typing import Dict, Optional
-import json
 
 from audio_extractor import extract_audio
 from realtime_client import RealtimeTranscriptionClient
@@ -66,18 +65,18 @@ async def upload_video(file: UploadFile = File(...)):
             "message": "影片上傳成功"
         }
     except Exception as e:
-        return {"error": f"音訊提取失敗: {str(e)}"}, 500
+        raise HTTPException(status_code=500, detail=f"音訊提取失敗: {str(e)}")
 
 
 @app.get("/video/{video_id}")
 async def get_video(video_id: str):
     """取得影片檔案"""
     if video_id not in video_storage:
-        return {"error": "影片不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片不存在")
     
     video_path = video_storage[video_id]["video_path"]
     if not os.path.exists(video_path):
-        return {"error": "影片檔案不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片檔案不存在")
     
     return FileResponse(video_path)
 
@@ -134,13 +133,13 @@ async def websocket_transcribe(websocket: WebSocket, video_id: str):
 async def translate_subtitles(video_id: str):
     """翻譯字幕為繁體中文"""
     if video_id not in video_storage:
-        return {"error": "影片不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片不存在")
     
     video_data = video_storage[video_id]
     subtitles = video_data["subtitles"]
     
     if not subtitles:
-        return {"error": "尚無字幕可翻譯"}, 400
+        raise HTTPException(status_code=400, detail="尚無字幕可翻譯")
     
     try:
         translated = []
@@ -159,20 +158,20 @@ async def translate_subtitles(video_id: str):
             "translated_count": len(translated)
         }
     except Exception as e:
-        return {"error": f"翻譯失敗: {str(e)}"}, 500
+        raise HTTPException(status_code=500, detail=f"翻譯失敗: {str(e)}")
 
 
 @app.post("/generate-notes/{video_id}")
 async def generate_video_notes(video_id: str):
     """生成影片筆記"""
     if video_id not in video_storage:
-        return {"error": "影片不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片不存在")
     
     video_data = video_storage[video_id]
     subtitles = video_data["subtitles"]
     
     if not subtitles:
-        return {"error": "尚無字幕可生成筆記"}, 400
+        raise HTTPException(status_code=400, detail="尚無字幕可生成筆記")
     
     # 組合所有字幕文字
     full_text = " ".join([s["text"] for s in subtitles])
@@ -184,14 +183,14 @@ async def generate_video_notes(video_id: str):
             "message": "筆記生成完成"
         }
     except Exception as e:
-        return {"error": f"筆記生成失敗: {str(e)}"}, 500
+        raise HTTPException(status_code=500, detail=f"筆記生成失敗: {str(e)}")
 
 
 @app.get("/subtitles/{video_id}")
 async def get_subtitles(video_id: str, language: Optional[str] = "original"):
     """取得字幕資料"""
     if video_id not in video_storage:
-        return {"error": "影片不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片不存在")
     
     video_data = video_storage[video_id]
     
@@ -207,7 +206,7 @@ async def get_subtitles(video_id: str, language: Optional[str] = "original"):
 async def export_srt(video_id: str, language: Optional[str] = "original"):
     """匯出 SRT 字幕檔"""
     if video_id not in video_storage:
-        return {"error": "影片不存在"}, 404
+        raise HTTPException(status_code=404, detail="影片不存在")
     
     video_data = video_storage[video_id]
     
@@ -219,7 +218,7 @@ async def export_srt(video_id: str, language: Optional[str] = "original"):
         text_key = "text"
     
     if not subtitles:
-        return {"error": "尚無字幕可匯出"}, 400
+        raise HTTPException(status_code=400, detail="尚無字幕可匯出")
     
     # 生成 SRT 內容
     srt_content = ""
