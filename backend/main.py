@@ -13,7 +13,7 @@ from typing import Dict, Optional
 from audio_extractor import extract_audio
 from whisper_client import WhisperTranscriptionClient
 from translator import translate_to_traditional_chinese
-from note_generator import generate_notes
+from note_generator import generate_bilingual_notes
 
 app = FastAPI(title="Video Subtitle API")
 
@@ -149,18 +149,7 @@ async def websocket_transcribe(websocket: WebSocket, video_id: str):
             "type": "completed",
             "message": "轉錄完成"
         })
-        
-        # 生成最終筆記
-        if video_data["subtitles"]:
-            try:
-                full_text = " ".join([s["text"] for s in video_data["subtitles"]])
-                notes = await generate_notes(full_text)
-                await websocket.send_json({
-                    "type": "notes",
-                    "data": notes
-                })
-            except Exception as e:
-                print(f"筆記生成失敗: {e}")
+        # 筆記生成由前端調用 REST API /generate-notes 觸發
         
     except WebSocketDisconnect:
         pass
@@ -212,7 +201,7 @@ async def translate_subtitles(video_id: str):
 
 @app.post("/generate-notes/{video_id}")
 async def generate_video_notes(video_id: str):
-    """生成影片筆記"""
+    """生成雙語版本影片筆記"""
     if video_id not in video_storage:
         raise HTTPException(status_code=404, detail="影片不存在")
     
@@ -226,9 +215,10 @@ async def generate_video_notes(video_id: str):
     full_text = " ".join([s["text"] for s in subtitles])
     
     try:
-        notes = await generate_notes(full_text)
+        bilingual_notes = await generate_bilingual_notes(full_text)
+        video_data["notes"] = bilingual_notes  # 儲存筆記
         return {
-            "notes": notes,
+            "notes": bilingual_notes,
             "message": "筆記生成完成"
         }
     except Exception as e:

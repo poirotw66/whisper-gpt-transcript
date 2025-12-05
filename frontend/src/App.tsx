@@ -15,11 +15,16 @@ interface Subtitle {
   translated_text?: string
 }
 
-interface Notes {
+interface SingleNotes {
   summary?: string
   key_points?: string[]
   keywords?: string[]
   insights?: string
+}
+
+interface BilingualNotes {
+  original?: SingleNotes | null
+  traditional?: SingleNotes | null
 }
 
 function App() {
@@ -28,7 +33,7 @@ function App() {
   const [subtitles, setSubtitles] = useState<Subtitle[]>([])
   const [language, setLanguage] = useState<'original' | 'traditional'>('original')
   const [isTranscribing, setIsTranscribing] = useState(false)
-  const [notes, setNotes] = useState<Notes | null>(null)
+  const [notes, setNotes] = useState<BilingualNotes | null>(null)
   const [showNotes, setShowNotes] = useState(false)
 
   const handleVideoUploaded = (id: string, url: string) => {
@@ -43,7 +48,7 @@ function App() {
     setSubtitles(prev => [...prev, subtitle])
   }
 
-  const handleNotesReceived = (notesData: Notes) => {
+  const handleNotesReceived = (notesData: BilingualNotes) => {
     setNotes(notesData)
     if (!showNotes) {
       setShowNotes(true)
