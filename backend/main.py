@@ -6,11 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
 import uuid
+import asyncio
 from pathlib import Path
 from typing import Dict, Optional
 
 from audio_extractor import extract_audio
-from realtime_client import RealtimeTranscriptionClient
+from whisper_client import WhisperTranscriptionClient
 from translator import translate_to_traditional_chinese
 from note_generator import generate_notes
 
@@ -83,7 +84,7 @@ async def get_video(video_id: str):
 
 @app.websocket("/ws/transcribe/{video_id}")
 async def websocket_transcribe(websocket: WebSocket, video_id: str):
-    """WebSocket 端點：即時轉錄"""
+    """WebSocket 端點：使用 Whisper API 轉錄"""
     await websocket.accept()
     
     if video_id not in video_storage:
@@ -99,13 +100,42 @@ async def websocket_transcribe(websocket: WebSocket, video_id: str):
         await websocket.close()
         return
     
+    # 檢查是否正在轉錄
+    if video_data.get("is_transcribing", False):
+        await websocket.send_json({
+            "type": "error",
+            "error": "轉錄正在進行中，請稍候"
+        })
+        await websocket.close()
+        return
+    
     try:
-        # 建立 Realtime API 客戶端
-        client = RealtimeTranscriptionClient()
+        # 標記為正在轉錄
+        video_data["is_transcribing"] = True
+        # 清空舊的字幕（防止重複）
+        video_data["subtitles"] = []
+        video_data["translated_subtitles"] = []
         
-        # 開始轉錄
-        async for subtitle_data in client.transcribe_audio_file(audio_path):
-            # 儲存字幕
+        # 通知前端開始轉錄
+        await websocket.send_json({
+            "type": "status",
+            "message": "正在使用 Whisper API 轉錄..."
+        })
+        
+        # 建立 Whisper API 客戶端
+        client = WhisperTranscriptionClient()
+        
+        # 使用 Whisper API 轉錄（同步處理，但有精確時間戳）
+        # 在後台執行轉錄，避免阻塞
+        loop = asyncio.get_event_loop()
+        subtitles = await loop.run_in_executor(
+            None,
+            client.transcribe_audio_file,
+            audio_path
+        )
+        
+        # 儲存並發送所有字幕
+        for subtitle_data in subtitles:
             video_data["subtitles"].append(subtitle_data)
             
             # 發送到前端
@@ -120,13 +150,32 @@ async def websocket_transcribe(websocket: WebSocket, video_id: str):
             "message": "轉錄完成"
         })
         
+        # 生成最終筆記
+        if video_data["subtitles"]:
+            try:
+                full_text = " ".join([s["text"] for s in video_data["subtitles"]])
+                notes = await generate_notes(full_text)
+                await websocket.send_json({
+                    "type": "notes",
+                    "data": notes
+                })
+            except Exception as e:
+                print(f"筆記生成失敗: {e}")
+        
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "error": str(e)
-        })
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "error": str(e)
+            })
+        except Exception:
+            pass
+    finally:
+        # 清除轉錄標記
+        if video_id in video_storage:
+            video_storage[video_id]["is_transcribing"] = False
 
 
 @app.post("/translate/{video_id}")

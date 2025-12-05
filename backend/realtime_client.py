@@ -21,6 +21,7 @@ class RealtimeTranscriptionClient:
         self.realtime_url = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-10-06"
         self.sample_rate = 24000
         self.chunk_size = 4096
+        self._audio_send_progress = None  # 用於追蹤音訊發送進度
     
     async def transcribe_audio_file(self, audio_path: str) -> AsyncIterator[Dict[str, Any]]:
         """
@@ -139,7 +140,7 @@ class RealtimeTranscriptionClient:
             await asyncio.gather(send_task, receive_task, return_exceptions=True)
     
     async def _send_audio_data(self, websocket, audio_path: str):
-        """發送音訊資料到 Realtime API"""
+        """發送音訊資料到 Realtime API，並追蹤時間進度"""
         try:
             with wave.open(audio_path, 'rb') as wav_file:
                 sample_rate = wav_file.getframerate()
@@ -151,15 +152,24 @@ class RealtimeTranscriptionClient:
                 bytes_per_frame = channels * sample_width
                 
                 # 計算每個 chunk 應該讀取的 frames 數
-                # chunk_size 是位元組數，我們希望每次發送約 20ms 的音訊
+                # 每次發送約 20ms 的音訊
                 frames_per_chunk = int(sample_rate * 0.02)  # 20ms 的音訊
-                bytes_per_chunk = frames_per_chunk * bytes_per_frame
                 
                 bytes_sent = 0
                 chunks_sent = 0
                 total_bytes = total_frames * bytes_per_frame
                 
-                print(f"開始發送音訊: 總共 {total_frames} frames, {total_bytes} 位元組")
+                # 計算每個 chunk 對應的時間（秒）
+                time_per_chunk = frames_per_chunk / sample_rate
+                
+                print(f"開始發送音訊: 總共 {total_frames} frames ({total_frames/sample_rate:.2f} 秒), {total_bytes} 位元組")
+                
+                # 將時間追蹤資訊存儲在類別變數中，供接收函數使用
+                self._audio_send_progress = {
+                    "chunks_sent": 0,
+                    "time_per_chunk": time_per_chunk,
+                    "current_time": 0.0
+                }
                 
                 # 快速發送所有音訊資料（不延遲，因為這是預錄檔案）
                 while True:
@@ -182,10 +192,15 @@ class RealtimeTranscriptionClient:
                         bytes_sent += len(audio_data)
                         chunks_sent += 1
                         
+                        # 更新時間追蹤
+                        self._audio_send_progress["chunks_sent"] = chunks_sent
+                        self._audio_send_progress["current_time"] = chunks_sent * time_per_chunk
+                        
                         # 每發送 50 個 chunks 顯示進度
                         if chunks_sent % 50 == 0:
                             progress = (bytes_sent / total_bytes) * 100
-                            print(f"發送進度: {progress:.1f}% ({chunks_sent} chunks)")
+                            current_time = chunks_sent * time_per_chunk
+                            print(f"發送進度: {progress:.1f}% ({chunks_sent} chunks, {current_time:.2f}s)")
                     except websockets.exceptions.ConnectionClosed:
                         # WebSocket 已關閉，停止發送
                         print(f"WebSocket 連接已關閉，已發送 {bytes_sent}/{total_bytes} 位元組 ({chunks_sent} chunks)")
@@ -194,7 +209,7 @@ class RealtimeTranscriptionClient:
                     # 小延遲避免發送過快導致緩衝區溢出
                     await asyncio.sleep(0.001)  # 1ms 延遲
                 
-                print(f"音訊發送完成: {bytes_sent}/{total_bytes} 位元組 ({chunks_sent} chunks)")
+                print(f"音訊發送完成: {bytes_sent}/{total_bytes} 位元組 ({chunks_sent} chunks, {chunks_sent * time_per_chunk:.2f}s)")
         
         except websockets.exceptions.ConnectionClosed as e:
             # 連接關閉是正常的（當接收完成時）
@@ -204,12 +219,14 @@ class RealtimeTranscriptionClient:
             raise
     
     async def _receive_transcriptions(self, websocket) -> AsyncIterator[Dict[str, Any]]:
-        """接收轉錄結果"""
+        """接收轉錄結果，使用音訊發送進度來計算準確的時間戳"""
         current_transcript = ""
-        start_time = None
         subtitle_id = 0
         last_subtitle_end_time = 0.0
-        accumulated_audio_time = 0.0  # 累積的音訊時間（秒）
+        
+        # 用於追蹤每個轉錄項目的開始時間（基於音訊位置）
+        transcription_start_times = {}  # item_id -> start_time
+        transcription_start_chunks = {}  # item_id -> chunk_number (用於計算時間)
         
         try:
             async for message in websocket:
@@ -225,45 +242,61 @@ class RealtimeTranscriptionClient:
                     delta = event.get("delta", "")
                     current_transcript += delta
                     
-                    # 從事件中取得時間戳（如果有的話）
-                    item = event.get("item", {})
-                    if "audio_start_ms" in item and start_time is None:
-                        start_time = item["audio_start_ms"] / 1000.0
-                    elif start_time is None:
-                        # 如果沒有時間戳，使用累積時間
-                        start_time = accumulated_audio_time
+                    # 取得 item_id
+                    item_id = event.get("item_id")
+                    
+                    # 記錄開始時間（基於當前發送的音訊位置）
+                    if item_id and item_id not in transcription_start_times:
+                        if self._audio_send_progress:
+                            # 使用當前發送的音訊位置作為開始時間
+                            current_chunk = self._audio_send_progress["chunks_sent"]
+                            time_per_chunk = self._audio_send_progress["time_per_chunk"]
+                            start_time = current_chunk * time_per_chunk
+                            transcription_start_times[item_id] = start_time
+                            transcription_start_chunks[item_id] = current_chunk
+                        else:
+                            # 如果沒有進度資訊，使用最後一個字幕的結束時間
+                            transcription_start_times[item_id] = last_subtitle_end_time
+                            transcription_start_chunks[item_id] = 0
                 
                 # 轉錄完成
                 elif event_type == "conversation.item.input_audio_transcription.completed":
+                    item_id = event.get("item_id")
                     item = event.get("item", {})
                     transcript = item.get("transcript", current_transcript)
                     
                     if transcript.strip():
                         subtitle_id += 1
                         
-                        # 嘗試從事件中取得時間戳
-                        audio_start_ms = item.get("audio_start_ms")
-                        audio_end_ms = item.get("audio_end_ms")
-                        
-                        if audio_start_ms is not None and audio_end_ms is not None:
-                            # 使用 API 提供的時間戳
-                            start_time = audio_start_ms / 1000.0
-                            end_time = audio_end_ms / 1000.0
-                            accumulated_audio_time = end_time
+                        # 確定開始時間（基於音訊位置）
+                        if item_id and item_id in transcription_start_times:
+                            start_time = transcription_start_times[item_id]
+                        elif "audio_start_ms" in item:
+                            start_time = item["audio_start_ms"] / 1000.0
+                        elif self._audio_send_progress:
+                            start_time = self._audio_send_progress["current_time"]
                         else:
-                            # 如果沒有時間戳，使用估算
-                            if start_time is None:
-                                start_time = last_subtitle_end_time
-                            
+                            start_time = last_subtitle_end_time
+                        
+                        # 確定結束時間（基於當前發送的音訊位置）
+                        if self._audio_send_progress and item_id and item_id in transcription_start_chunks:
+                            # 使用當前發送進度作為結束時間
+                            end_time = self._audio_send_progress["current_time"]
+                        elif "audio_end_ms" in item:
+                            end_time = item["audio_end_ms"] / 1000.0
+                        elif self._audio_send_progress:
+                            end_time = self._audio_send_progress["current_time"]
+                        else:
                             # 根據文字長度估算持續時間
-                            # 中文平均每字約 0.3-0.4 秒，英文平均每字約 0.2-0.3 秒
-                            word_count = len(transcript.split())
                             char_count = len(transcript)
-                            
-                            # 混合估算：考慮中英文混合
-                            estimated_duration = max(1.0, word_count * 0.3 + (char_count - word_count) * 0.1)
+                            estimated_duration = max(1.0, char_count * 0.25)
                             end_time = start_time + estimated_duration
-                            accumulated_audio_time = end_time
+                        
+                        # 確保時間戳是遞增的
+                        if start_time < last_subtitle_end_time:
+                            start_time = last_subtitle_end_time
+                        if end_time <= start_time:
+                            end_time = start_time + max(1.0, len(transcript) * 0.25)
                         
                         subtitle_data = {
                             "id": subtitle_id,
@@ -279,11 +312,15 @@ class RealtimeTranscriptionClient:
                         # 更新最後一個字幕的結束時間
                         last_subtitle_end_time = end_time
                         
+                        # 清理已完成的轉錄項目的時間戳
+                        if item_id:
+                            transcription_start_times.pop(item_id, None)
+                            transcription_start_chunks.pop(item_id, None)
+                        
                         # 重置
                         current_transcript = ""
-                        start_time = None
                 
-                # 會話更新事件 - 可能包含音訊進度資訊
+                # 會話更新事件
                 elif event_type == "session.updated":
                     session = event.get("session", {})
                     # 可以從這裡取得音訊進度資訊（如果有）

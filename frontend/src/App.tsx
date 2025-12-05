@@ -43,6 +43,13 @@ function App() {
     setSubtitles(prev => [...prev, subtitle])
   }
 
+  const handleNotesReceived = (notesData: Notes) => {
+    setNotes(notesData)
+    if (!showNotes) {
+      setShowNotes(true)
+    }
+  }
+
   const handleTranscriptionStart = () => {
     setIsTranscribing(true)
   }
@@ -126,9 +133,12 @@ function App() {
                 <VideoPlayer
                   videoUrl={videoUrl!}
                   videoId={videoId}
+                  subtitles={subtitles}
+                  language={language}
                   onSubtitleReceived={handleSubtitleReceived}
                   onTranscriptionStart={handleTranscriptionStart}
                   onTranscriptionComplete={handleTranscriptionComplete}
+                  onNotesReceived={handleNotesReceived}
                   onEnded={handleVideoEnded}
                 />
                 

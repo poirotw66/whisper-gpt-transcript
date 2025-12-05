@@ -2,44 +2,83 @@ import { useEffect, useRef, useState } from 'react'
 import { Play, Pause, Loader2 } from 'lucide-react'
 import useWebSocket from '../hooks/useWebSocket'
 
+interface Subtitle {
+  id: number
+  start_time: number
+  end_time: number
+  text: string
+  translated_text?: string
+}
+
 interface VideoPlayerProps {
   videoUrl: string
   videoId: string
+  subtitles: Subtitle[]
+  language: 'original' | 'traditional'
   onSubtitleReceived: (subtitle: any) => void
   onTranscriptionStart: () => void
   onTranscriptionComplete: () => void
+  onNotesReceived?: (notes: any) => void
   onEnded: () => void
 }
 
 export default function VideoPlayer({
   videoUrl,
   videoId,
+  subtitles,
+  language,
   onSubtitleReceived,
   onTranscriptionStart,
   onTranscriptionComplete,
+  onNotesReceived,
   onEnded
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [hasStarted, setHasStarted] = useState(false)
+  const [currentSubtitle, setCurrentSubtitle] = useState<Subtitle | null>(null)
+  const wsRef = useRef<{ connect: () => void; disconnect: () => void } | null>(null)
 
   const { connect, disconnect, connected } = useWebSocket(
     `/ws/transcribe/${videoId}`,
     {
       onMessage: (data: any) => {
-        if (data.type === 'subtitle') {
+        console.log('WebSocket 收到消息:', data.type)
+        if (data.type === 'status') {
+          console.log('狀態:', data.message)
+        } else if (data.type === 'subtitle') {
+          console.log('收到字幕:', data.data)
           onSubtitleReceived(data.data)
         } else if (data.type === 'completed') {
+          console.log('轉錄完成')
           setIsTranscribing(false)
           onTranscriptionComplete()
+          // 延遲斷開連接，等待筆記生成
+          setTimeout(() => {
+            disconnect()
+            wsRef.current = null
+          }, 2000)
+        } else if (data.type === 'notes') {
+          console.log('收到筆記')
+          if (onNotesReceived) {
+            onNotesReceived(data.data)
+          }
         } else if (data.type === 'error') {
           console.error('轉錄錯誤:', data.error)
           setIsTranscribing(false)
+          disconnect()
+          wsRef.current = null
         }
-      }
+      },
+      reconnect: false
     }
   )
+
+  // 儲存 WebSocket 連接函數的引用
+  useEffect(() => {
+    wsRef.current = { connect, disconnect }
+  }, [connect, disconnect])
 
   useEffect(() => {
     return () => {
@@ -47,14 +86,42 @@ export default function VideoPlayer({
     }
   }, [disconnect])
 
+  // 根據影片播放時間更新當前字幕
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    const updateSubtitle = () => {
+      const currentTime = video.currentTime
+      
+      // 找到當前時間對應的字幕
+      const activeSubtitle = subtitles.find(
+        (subtitle) => 
+          currentTime >= subtitle.start_time && 
+          currentTime <= subtitle.end_time
+      )
+      
+      setCurrentSubtitle(activeSubtitle || null)
+    }
+
+    video.addEventListener('timeupdate', updateSubtitle)
+    return () => {
+      video.removeEventListener('timeupdate', updateSubtitle)
+    }
+  }, [subtitles])
+
   const handlePlay = () => {
     if (videoRef.current) {
-      if (!hasStarted) {
-        // 第一次播放時開始轉錄
+      if (!hasStarted && !isTranscribing) {
+        // 第一次播放時開始轉錄，且確保沒有正在進行的轉錄
         setHasStarted(true)
         setIsTranscribing(true)
         onTranscriptionStart()
-        connect()
+        if (wsRef.current) {
+          wsRef.current.connect()
+        } else {
+          connect()
+        }
       }
       videoRef.current.play()
       setIsPlaying(true)
@@ -70,8 +137,20 @@ export default function VideoPlayer({
 
   const handleEnded = () => {
     setIsPlaying(false)
-    disconnect()
+    // 不要在影片結束時斷開連接，等待轉錄完成
+    // Whisper API 是一次性處理，需要等待結果返回
+    if (!isTranscribing) {
+      disconnect()
+    }
     onEnded()
+  }
+
+  const getSubtitleText = (subtitle: Subtitle | null) => {
+    if (!subtitle) return null
+    if (language === 'traditional' && subtitle.translated_text) {
+      return subtitle.translated_text
+    }
+    return subtitle.text
   }
 
   return (
@@ -84,6 +163,15 @@ export default function VideoPlayer({
           onEnded={handleEnded}
           controls
         />
+        
+        {/* 即時字幕疊加顯示 */}
+        {currentSubtitle && (
+          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/60 to-transparent px-4 py-6">
+            <p className="text-white text-lg font-medium text-center drop-shadow-lg">
+              {getSubtitleText(currentSubtitle)}
+            </p>
+          </div>
+        )}
         
         {isTranscribing && (
           <div className="absolute top-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2">

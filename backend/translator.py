@@ -23,7 +23,7 @@ async def translate_to_traditional_chinese(text: str) -> str:
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-nano-2025-08-07",
             messages=[
                 {
                     "role": "system",

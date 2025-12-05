@@ -1,8 +1,12 @@
 """
-筆記生成服務 - 使用 GPT-4o 生成影片筆記
+筆記生成服務 - 使用 GPT 生成影片筆記
 """
 import os
 from openai import OpenAI
+
+
+# 筆記生成使用的模型
+NOTE_MODEL = "gpt-5-nano-2025-08-07"  # 輕量模型，速度快、成本低
 
 
 async def generate_notes(transcript_text: str) -> dict:
@@ -23,7 +27,7 @@ async def generate_notes(transcript_text: str) -> dict:
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=NOTE_MODEL,
             messages=[
                 {
                     "role": "system",
